@@ -2,7 +2,6 @@ import math
 import torch
 import warnings
 
-# 假设你编译好的扩展模块叫 custom_attn_ext
 import custom_attention_ext
 
 def flash_attn_varlen_func(
@@ -23,12 +22,18 @@ def flash_attn_varlen_func(
     return_attn_probs=False,
     block_table=None,
 ):
-    """
-    1:1 平替官方的 flash_attn_varlen_func。
-    内部将请求重定向到我们自己手写的 Paged Flash Attention CUDA Kernel。
-    """
+    device = q.device
     
-    # --- 1. 参数不支持警告拦截 ---
+    # 🌟 强制断言：严禁跑错精度！
+    if q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16:
+        raise RuntimeError(f"Custom Kernel ONLY supports BF16! Expected torch.bfloat16, but got q={q.dtype}, k={k.dtype}.")
+
+    # 🌟 永远只对 Q 做连续化
+    q = q.contiguous()
+
+    cu_seqlens_q = cu_seqlens_q.to(device)
+    cu_seqlens_k = cu_seqlens_k.to(device)
+
     if dropout_p > 0.0:
         warnings.warn("Custom Flash Attention currently does not support dropout. Ignoring dropout_p.")
     if window_size != (-1, -1):
@@ -36,35 +41,42 @@ def flash_attn_varlen_func(
     if softcap > 0.0 or alibi_slopes is not None:
         raise NotImplementedError("softcap and alibi_slopes are not supported in the custom kernel.")
     if not causal:
-        # 注意：我们的 Kernel 里默认强制了 Causal Mask，如果要关闭需要改 CUDA 里的 if 判断
         warnings.warn("Custom Flash Attention implicitly uses Causal Masking right now.")
     
-    # 强制检查我们的看家本领：Paged Block Table
-    if block_table is None:
-        raise ValueError("Our Custom Kernel is specifically designed for Paged KV-Cache! block_table cannot be None.")
+    is_paged = block_table is not None
+    if is_paged:
+        num_blocks, block_size, num_kv_heads, _ = k.shape
+        bt = block_table.to(device)
+        max_blocks_per_seq = block_table.shape[1]
+        # 🚨 绝对不对 k, v 做 contiguous，直接用原始的内存池！
+    else:
+        total_k, num_kv_heads, _ = k.shape
+        block_size = 256  
+        max_blocks_per_seq = 0
+        bt = torch.empty((0,), dtype=torch.int32, device=q.device) 
+        # 🌟 只有在连续模式下（预热阶段），才做连续化
+        k = k.contiguous()
+        v = v.contiguous()
 
-    # --- 2. 形状与参数计算 ---
     total_q, num_heads, head_dim = q.shape
-    num_blocks, block_size, num_kv_heads, _ = k.shape
-    max_blocks_per_seq = block_table.shape[1]
+
+    if head_dim not in [64, 128]:
+        raise ValueError(f"Custom Kernel only supports head_dim 64 or 128, but got {head_dim}")
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
-    # 预分配输出 Tensor
+    # 预分配原生 bfloat16
     out = torch.empty_like(q)
 
-    # --- 3. 调用底层的 C++ Kernel ---
-    # custom_attn_ext.run_custom_flash_attn_varlen(
-    #     q, k, v, out, 
-    #     cu_seqlens_q, cu_seqlens_k, block_table,
-    #     softmax_scale, max_seqlen_q, max_seqlen_k,
-    #     num_heads, num_kv_heads, block_size, max_blocks_per_seq
-    # )
+    custom_attention_ext.run_custom_flash_attn_varlen(
+         q, k, v, out, 
+         cu_seqlens_q, cu_seqlens_k, bt, is_paged,
+         softmax_scale, max_seqlen_q, max_seqlen_k,
+         num_heads, num_kv_heads, block_size, max_blocks_per_seq
+    )
 
-    # --- 4. 返回值封装 ---
     if return_attn_probs:
-        # 官方接口在测试时可能需要返回 LSE 和 Dmask，这里我们填 None
         return out, None, None
     
     return out

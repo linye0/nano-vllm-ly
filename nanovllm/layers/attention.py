@@ -10,7 +10,7 @@ from nanovllm.custom.custom_attention import flash_attn_varlen_func as custom_fl
 
 from nanovllm.utils.context import get_context
 
-USE_CUSTOM_ATTN = os.environ.get("NANO_USE_CUSTOM_ATTN", "0") == "1"
+USE_CUSTOM_ATTN = os.environ.get("USE_CUSTOM_PREFILL", "0") == "1"
 
 @triton.jit
 def store_kvcache_kernel(
@@ -71,8 +71,8 @@ class Attention(nn.Module):
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
 
-            if USE_CUSTOM_ATTN and context.block_tables is not None:
-                print("[DEBUG] Routing to CUSTOM Flash Attention Kernel...")
+            if USE_CUSTOM_ATTN:
+                #print("[DEBUG] Routing to CUSTOM Flash Attention Kernel...")
                 o = custom_flash_attn_varlen_func(
                     q, k, v,
                     max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
