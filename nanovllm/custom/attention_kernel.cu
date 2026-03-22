@@ -150,7 +150,7 @@ __global__ void flash_attn_varlen_wmma_kernel(
     __nv_bfloat16* s_K = s_Q + Br * D_padded; 
     __nv_bfloat16* s_V = s_K + 2 * Bc * D_padded;
     
-    // 🌟 新增：专门用于碎片布局转换的 P 矩阵中转站
+    // 新增：专门用于碎片布局转换的 P 矩阵中转站
     float* s_P_base = (float*)(s_V + 2 * Bc * D_padded);
 
     int write_stage = 0; 
@@ -265,7 +265,7 @@ __global__ void flash_attn_varlen_wmma_kernel(
                 sum2_local += (p0 + p1);
             }
             
-            // 🌟 修复关键点：将算出的概率直接塞回 accumulator fragment！
+            // 修复关键点：将算出的概率直接塞回 accumulator fragment！
             s_frag[0].x[i] = p0;
             s_frag[1].x[i] = p1;
         }
@@ -292,9 +292,7 @@ __global__ void flash_attn_varlen_wmma_kernel(
             }
         }
 
-        // ========================================================
-        // 🌟 核心中转站：通过 Shared Memory 重排 P 矩阵的布局
-        // ========================================================
+        // 核心中转站：通过 Shared Memory 重排 P 矩阵的布局
         float* warp_s_P_f = s_P_base + wid * 512;
         // 1. 从 accumulator 写出到 Shared Memory (自动转换为标准的行主序)
         wmma::store_matrix_sync(warp_s_P_f,       s_frag[0], 16, wmma::mem_row_major);
@@ -312,7 +310,6 @@ __global__ void flash_attn_varlen_wmma_kernel(
         // 3. 作为正确的 matrix_a 类型读回来！
         wmma::load_matrix_sync(p_frag[0], warp_s_P_bf16,       16);
         wmma::load_matrix_sync(p_frag[1], warp_s_P_bf16 + 256, 16);
-        // ========================================================
 
         const __nv_bfloat16* cur_s_V = s_V + read_stage * Bc * D_padded;
         for (int vi = 0; vi < num_d_steps; ++vi) {

@@ -24,11 +24,9 @@ def flash_attn_varlen_func(
 ):
     device = q.device
     
-    # 🌟 强制断言：严禁跑错精度！
     if q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16:
         raise RuntimeError(f"Custom Kernel ONLY supports BF16! Expected torch.bfloat16, but got q={q.dtype}, k={k.dtype}.")
 
-    # 🌟 永远只对 Q 做连续化
     q = q.contiguous()
 
     cu_seqlens_q = cu_seqlens_q.to(device)
@@ -48,13 +46,11 @@ def flash_attn_varlen_func(
         num_blocks, block_size, num_kv_heads, _ = k.shape
         bt = block_table.to(device)
         max_blocks_per_seq = block_table.shape[1]
-        # 🚨 绝对不对 k, v 做 contiguous，直接用原始的内存池！
     else:
         total_k, num_kv_heads, _ = k.shape
         block_size = 256  
         max_blocks_per_seq = 0
         bt = torch.empty((0,), dtype=torch.int32, device=q.device) 
-        # 🌟 只有在连续模式下（预热阶段），才做连续化
         k = k.contiguous()
         v = v.contiguous()
 

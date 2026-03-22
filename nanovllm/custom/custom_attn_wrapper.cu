@@ -35,7 +35,6 @@ void run_custom_flash_attn_varlen(
     dim3 block(128);
 
     int D_padded = head_dim + 8;
-    // 🌟 核心更新：加入 P 中转站所需的大小
     int smem_bytes = (Br + 4 * Bc) * D_padded * sizeof(__nv_bfloat16) + (Br * Bc) * sizeof(float);
 
     const __nv_bfloat16* q_ptr = reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>());

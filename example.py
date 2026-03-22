@@ -1,12 +1,27 @@
 import os
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
+from nanovllm import config
+import argparse
+
 
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="~/huggingface/Qwen3-0.6B/")
+    parser.add_argument("--custom_prefill", action="store_true", help="Use custom prefill kernel")
+    parser.add_argument("--enforce_eager", action="store_true", default=True)
+    parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    
+    args = parser.parse_args()
+
+    cfg = config.init_cfg(args)
+
+    if cfg.custom_prefill:
+        print("[INFO] Use custom prefill kernel")
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model)
+    llm = LLM(cfg.model, enforce_eager=cfg.enforce_eager, tensor_parallel_size=cfg.tensor_parallel_size)
 
     sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
     prompts = [
