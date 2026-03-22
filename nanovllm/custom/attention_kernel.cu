@@ -8,13 +8,11 @@
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
 
+using namespace nvcuda;
+
 #define WMMA_M 16
 #define WMMA_N 16
 #define WMMA_K 16
-
-using namespace nvcuda;
-
-
 
 __device__ __forceinline__ void load_global_to_shared_bf16(
     __nv_bfloat16* s_ptr,
