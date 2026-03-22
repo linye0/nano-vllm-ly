@@ -2,10 +2,15 @@ import torch
 from torch import nn
 import triton
 import triton.language as tl
+import os
 
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+from nanovllm.custom.custom_attention import flash_attn_varlen_func as custom_flash_attn_varlen_func
+
 from nanovllm.utils.context import get_context
 
+USE_CUSTOM_ATTN = os.environ.get("NANO_USE_CUSTOM_ATTN", "0") == "1"
 
 @triton.jit
 def store_kvcache_kernel(
@@ -18,8 +23,8 @@ def store_kvcache_kernel(
     slot_mapping_ptr,
     D: tl.constexpr,
 ):
-    idx = tl.program_id(0)
-    slot = tl.load(slot_mapping_ptr + idx)
+    idx = tl.program_id(0) # 一个idx对应一个token
+    slot = tl.load(slot_mapping_ptr + idx) # slot是当前token对应的具体索引(精度不是以block为单位，而是以token为单位)
     if slot == -1: return
     key_offsets = idx * key_stride + tl.arange(0, D)
     value_offsets = idx * value_stride + tl.arange(0, D)
@@ -31,14 +36,15 @@ def store_kvcache_kernel(
 
 
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
-    N, num_heads, head_dim = key.shape
-    D = num_heads * head_dim
+    N, num_heads, head_dim = key.shape # N是待处理的tokens数量，num_heads是注意力头的数量，head_dim是每个头的维度
+    D = num_heads * head_dim 
     assert key.stride(-1) == 1 and value.stride(-1) == 1
     assert key.stride(1) == head_dim and value.stride(1) == head_dim
-    assert k_cache.stride(1) == D and v_cache.stride(1) == D
+    # k_cache和v_cache的shape应该是[num_blocks, block_size, num_kv_heads, head_dim]
+    assert k_cache.stride(1) == D and v_cache.stride(1) == D 
     assert slot_mapping.numel() == N
-    store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
-
+    # 开启N个线程，每个线程对应一个token
+    store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D) 
 
 class Attention(nn.Module):
 
@@ -64,10 +70,22 @@ class Attention(nn.Module):
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
-            o = flash_attn_varlen_func(q, k, v,
-                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+
+            if USE_CUSTOM_ATTN and context.block_tables is not None:
+                print("[DEBUG] Routing to CUSTOM Flash Attention Kernel...")
+                o = custom_flash_attn_varlen_func(
+                    q, k, v,
+                    max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
+                    max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                    softmax_scale=self.scale, causal=True, block_table=context.block_tables
+                )
+            else:
+                # warmup或非paged阶段
+                o = flash_attn_varlen_func(
+                    q, k, v,
+                    max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
+                    max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                    softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
                                         cache_seqlens=context.context_lens, block_table=context.block_tables, 
