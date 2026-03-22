@@ -1,4 +1,4 @@
-# Nano-VLLM (Custom Prefill Edition)
+# Nano-VLLM (Custom Edition)
 
 这是一个基于[nano-vllm](https://github.com/vllm-project/vllm)深度定制的轻量级大模型推理引擎。
 
