@@ -47,9 +47,9 @@ python bench.py --custom_kernel
 
 通过将原生的 Triton 实现替换为深度定制的 CUDA C++ 算子，在相同硬件下，端到端 Decoding 阶段的吞吐量提升了约 86.4%。这一巨大的性能飞跃主要归功于以下底层的极致榨取：
 
-128-bit 向量化访存 (float4)：在 Paged Attention 抓取跳跃的 KV Cache 物理块时，强行对齐内存地址并打满总线带宽，消除了 Triton 编译器保守的非合并访存劣势。
+- **128-bit 向量化访存 (float4):** 在 Paged Attention 抓取跳跃的 KV Cache 物理块时，强行对齐内存地址并打满总线带宽，消除了 Triton 编译器保守的非合并访存劣势。
 
-指令级控制流优化：通过纯 C++ 硬编码循环与寻址公式，彻底清除了 Triton 在处理动态块映射 (Block Table) 时产生的冗余指针追踪 (Pointer Chasing) 与高频整数除法/取模开销。
+- **指令级控制流优化：** 通过纯 C++ 硬编码循环与寻址公式，彻底清除了 Triton 在处理动态块映射 (Block Table) 时产生的冗余指针追踪与高频整数除法/取模开销。
 
-细粒度 Warp 级规约：在 Online Softmax 阶段，使用硬件级的 __shfl_xor_sync 原语配合极简的 Shared Memory 布局，实现了低延迟的块内与跨 Warp 规约计算。
+- **细粒度 Warp 级规约：** 在 Online Softmax 阶段，使用硬件级的 __shfl_xor_sync 原语配合极简的 Shared Memory 布局，实现了低延迟的块内与跨 Warp 规约计算。
 
