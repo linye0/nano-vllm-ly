@@ -11,7 +11,7 @@ def main():
     # 1. 设置参数解析器
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="~/huggingface/Qwen3-0.6B/")
-    parser.add_argument("--custom_prefill", action="store_true")
+    parser.add_argument("--custom_kernel", action="store_true")
     # 注意：bench.py 原本 enforce_eager 为 False
     parser.add_argument("--enforce_eager", action="store_true", default=False)
     parser.add_argument("--num_seqs", type=int, default=256)
@@ -21,8 +21,8 @@ def main():
 
     # 2. 初始化全局配置
     cfg = config.init_cfg(args)
-    if cfg.custom_prefill:
-        print("[INFO] Benchmarking with CUSTOM prefill kernel")
+    if cfg.custom_kernel:
+        print("[INFO] Benchmarking with CUSTOM kernel")
 
     seed(0)
     num_seqs = args.num_seqs

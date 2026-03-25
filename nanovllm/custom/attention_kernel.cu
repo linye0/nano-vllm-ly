@@ -96,11 +96,11 @@ __device__ __forceinline__ void apply_mask(
 }
 
 template<int D, int Br = 64, int Bc = 32>
-__global__ void flash_attn_varlen_wmma_kernel(
-    const __nv_bfloat16* __restrict__ Q, 
-    const __nv_bfloat16* __restrict__ K_cache, 
-    const __nv_bfloat16* __restrict__ V_cache, 
-    __nv_bfloat16* __restrict__ O, 
+__global__ void flash_attn_prefill_kernel(
+    const __nv_bfloat16* __restrict__ Q, // [num_tokens, num_heads, head_dim]
+    const __nv_bfloat16* __restrict__ K_cache, // paged: [num_blocks, block_dim, num_heads, head_dim] unpaged: [num_tokens, num_heads, head_dim]
+    const __nv_bfloat16* __restrict__ V_cache, // 同k
+    __nv_bfloat16* __restrict__ O, // 同Q
     const int* __restrict__ cu_seqlens_q, 
     const int* __restrict__ cu_seqlens_k, 
     const int* __restrict__ block_table, 
@@ -468,4 +468,207 @@ __global__ void flash_attn_varlen_wmma_kernel(
         }
         __syncwarp(); 
     }
+}
+
+template<int D, int partition_size = 128>
+__global__ void flash_attn_decode_partial_kernel(
+    const __nv_bfloat16* __restrict__ q,           // [batch, 1, n_heads, head_dim]
+    const __nv_bfloat16* __restrict__ k_cache,     // [num_blocks, block_size, n_heads_kv, head_dim]
+    const __nv_bfloat16* __restrict__ v_cache,     // [num_blocks, block_size, n_heads_kv, head_dim]
+    const int* __restrict__ block_table,           // [batch, max_num_blocks]
+    const int* __restrict__ context_lens,          // [batch]
+    float* __restrict__ tmp_out,                   // [batch, n_heads, num_splits, d]
+    float* __restrict__ tmp_lse,                   // [batch, n_heads, num_splits, 2] (m 和 l)
+    int n_heads, int n_heads_kv, 
+    int block_size, int max_blocks_per_seq, 
+    float scale
+) {
+    constexpr int head_dim = D;
+    int batch_idx = blockIdx.x;
+    int head_idx = blockIdx.y;
+    int split_idx = blockIdx.z;
+    int tidx = threadIdx.x;
+    int kv_head_idx = head_idx / (n_heads / n_heads_kv);
+    int num_splits = gridDim.z;
+
+    // 越界保护
+    int seq_len = context_lens[batch_idx];
+    int start_token = split_idx * partition_size;
+
+    int valid_tokens_in_split = max(0, min(partition_size, seq_len - start_token));
+
+    extern __shared__ char dynamic_sram[];
+    __nv_bfloat16* sram = (__nv_bfloat16*)dynamic_sram;
+    __nv_bfloat16* s_Q = sram;
+
+    // 因为这边的K和V是完全不复用的，所以只需要把Q加载到sram里面就可以了
+    const __nv_bfloat16* q_ptr = q + batch_idx * n_heads * head_dim + head_idx * head_dim;
+    #pragma unroll
+    for (int i = tidx * 8; i < head_dim; i += blockDim.x * 8) {
+        // 把8个bfloat16视作一个uint4进行合并读取
+        *reinterpret_cast<uint4*>(&s_Q[i]) = *reinterpret_cast<const uint4*>(&q_ptr[i]);
+    }
+    __syncthreads();
+
+    int kv_stride =  n_heads_kv * head_dim;
+
+    float m_i = -1e20f;
+    float l_i = 0.0f;
+    float o_reg[head_dim] = {0.0f};
+
+    for (int i = tidx; i < valid_tokens_in_split; i += blockDim.x) {
+        // 对于每个thread，分别计算起始位置
+        int global_token_idx = start_token + i;
+        int logical_block_idx = global_token_idx / block_size;
+        int offset_in_block = global_token_idx % block_size;
+
+        int physical_block_idx = block_table[batch_idx * max_blocks_per_seq + logical_block_idx];
+
+        int kv_start_offset = physical_block_idx * block_size * kv_stride
+                            + offset_in_block * kv_stride
+                            + kv_head_idx * head_dim;
+
+        const __nv_bfloat16* k_cur_ptr = k_cache + kv_start_offset;
+        const __nv_bfloat16* v_cur_ptr = v_cache + kv_start_offset;
+
+        float sum = 0.0f;
+        #pragma unroll
+        for (int k = 0; k < head_dim; k += 8) {
+            const float4 k_raw = *(const float4*)(&k_cur_ptr[k]);
+            const __nv_bfloat162* k_bf16x2 = reinterpret_cast<const __nv_bfloat162*>(&k_raw);
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                float2 k_f2 = __bfloat1622float2(k_bf16x2[j]);
+                sum += k_f2.x * __bfloat162float(s_Q[k + j * 2 + 0]);
+                sum += k_f2.y * __bfloat162float(s_Q[k + j * 2 + 1]);
+            }
+        }
+        sum *= scale;
+
+        // Online softmax 更新
+        float m_prev = m_i;
+        m_i = fmaxf(m_prev, sum);
+        float alpha = expf(m_prev - m_i);
+        float beta = expf(sum - m_i);
+        l_i = l_i * alpha + beta;
+
+        #pragma unroll
+        for (int v = 0; v < head_dim; v += 8) {
+            const float4 v_raw = *(const float4*)(&v_cur_ptr[v]);
+            const __nv_bfloat162* v_bf16x2 = reinterpret_cast<const __nv_bfloat162*>(&v_raw);
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                float2 v_f2 = __bfloat1622float2(v_bf16x2[j]);
+                o_reg[v + j * 2 + 0] = o_reg[v + j * 2 + 0] * alpha + beta * v_f2.x;
+                o_reg[v + j * 2 + 1] = o_reg[v + j * 2 + 1] * alpha + beta * v_f2.y;
+            }
+        }
+    }
+
+    // 块内归约
+    // 第一步: warp shuffle规约(32线程合并)
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        float m_other = __shfl_xor_sync(0xffffffff, m_i, offset);
+        float l_other = __shfl_xor_sync(0xffffffff, l_i, offset);
+
+        float m_max = fmaxf(m_i, m_other);
+        float a = expf(m_i - m_max);
+        float b = expf(m_other - m_max);
+
+        m_i = m_max;
+        l_i = l_i * a + l_other * b;
+        #pragma unroll
+        for (int k = 0; k < head_dim; ++k) {
+            float o_other = __shfl_xor_sync(0xffffffff, o_reg[k], offset);
+            o_reg[k] = o_reg[k] * a + o_other * b;
+        }
+    }
+
+    // 跨warp规约(使用Shared Mem交换各个warp领头线程的结果)
+    __shared__ float s_m[32];
+    __shared__ float s_l[32];
+    __shared__ float s_o[32][head_dim];
+
+    int lane = tidx % 32;
+    int wid = tidx / 32;
+    int num_warps = blockDim.x / 32;
+
+    if (lane == 0) {
+        s_m[wid] = m_i;
+        s_l[wid] = l_i;
+        #pragma unroll
+        for (int k = 0; k < head_dim; ++k) s_o[wid][k] = o_reg[k];
+    }
+
+    __syncthreads();
+
+    // 由tx=0线程对四个warp的结果进行合并
+    if (tidx == 0) {
+        float m_block = s_m[0];
+        float l_block = s_l[0];
+        float o_block[head_dim];
+        #pragma unroll
+        for (int k = 0; k < head_dim; ++k) o_block[k] = s_o[0][k];
+
+        for (int w = 1; w < num_warps; ++w) {
+            float m_w = s_m[w];
+            float l_w = s_l[w];
+            float m_max = fmaxf(m_block, m_w);
+            float a = expf(m_block - m_max);
+            float b = expf(m_w - m_max);
+
+            l_block = l_block * a + l_w * b;
+            m_block = m_max;
+            #pragma unroll
+            for (int k = 0; k < head_dim; ++k) o_block[k] = o_block[k] * a + s_o[w][k] * b;
+        }
+
+        // 写回workspace，供reduction phase使用
+        int base_offset = (batch_idx * n_heads + head_idx) * num_splits;
+        int lse_offset = (base_offset + split_idx) * 2;
+        int out_offset = (base_offset + split_idx) * head_dim;
+        
+        tmp_lse[lse_offset + 0] = m_block;
+        tmp_lse[lse_offset + 1] = l_block;
+        #pragma unroll
+        for (int k = 0; k < head_dim; ++k) tmp_out[out_offset + k] = o_block[k];
+    }
+}
+
+template<int D>
+__global__ void flash_attn_decode_reduce_kernel(
+    const float* __restrict__ tmp_out, // [batch, n_heads, num_splits, head_dim]
+    const float* __restrict__ tmp_lse, // [batch, n_heads, num_splits, 2]
+    __nv_bfloat16* __restrict__ out, // [batch, 1, n_heads, head_dim]
+    int num_splits,
+    int n_heads
+) {
+    const int batch_idx = blockIdx.x;
+    const int head_idx = blockIdx.y;
+    const int tidx = threadIdx.x;
+
+    if (tidx >= D) return;
+
+    const float* lse_ptr = tmp_lse + (batch_idx * n_heads + head_idx) * num_splits * 2;
+    const float* out_ptr = tmp_out + (batch_idx * n_heads + head_idx) * num_splits * D;
+
+    float m_max = -1e20f;
+    for (int s = 0; s < num_splits; ++s) {
+        m_max = fmaxf(m_max, lse_ptr[s * 2 + 0]);
+    }
+
+    float acc_v = 0.0f;
+    float sum_l = 0.0f;
+    for (int s = 0; s < num_splits; ++s) {
+        float m_s = lse_ptr[s * 2 + 0];
+        float l_s = lse_ptr[s * 2 + 1];
+
+        float w = expf(m_s - m_max);
+        acc_v += out_ptr[s * D + tidx] * w;
+        sum_l += l_s * w;
+    }
+
+    float final_v = acc_v / sum_l;
+    out[(batch_idx * n_heads + head_idx) * D + tidx] = __float2bfloat16(final_v);
 }

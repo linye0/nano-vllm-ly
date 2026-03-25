@@ -9,7 +9,7 @@ import argparse
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="~/huggingface/Qwen3-0.6B/")
-    parser.add_argument("--custom_prefill", action="store_true", help="Use custom prefill kernel")
+    parser.add_argument("--custom_kernel", action="store_true", help="Use custom prefill kernel")
     parser.add_argument("--enforce_eager", action="store_true", default=True)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     
@@ -17,7 +17,7 @@ def main():
 
     cfg = config.init_cfg(args)
 
-    if cfg.custom_prefill:
+    if cfg.custom_kernel:
         print("[INFO] Use custom prefill kernel")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model)

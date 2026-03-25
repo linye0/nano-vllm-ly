@@ -7,9 +7,11 @@
 ## 快速开始
 
 ### 1. 编译安装
+
 原生nano-vllm的配置请参考[原repo](https://github.com/vllm-project/vllm).
 
 要使用自定义的kernel，首先需要编译并安装 CUDA 扩展包：
+
 ```bash
 cd nanovllm/custom && python setup.py instal
 ```
@@ -17,7 +19,7 @@ cd nanovllm/custom && python setup.py instal
 ### 2. 运行基础示例
 
 ```bash
-python example.py --custom_prefill
+python example.py --custom_kernel
 ```
 
 运行结果：
