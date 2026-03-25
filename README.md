@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="fig/image-2.png" width="45%" />
+  <img src="fig/image-2.png" width="30%" />
 </p>
 
 # Nano-VLLM-ly (Custom Edition)
