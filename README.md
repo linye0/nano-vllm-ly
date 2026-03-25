@@ -22,10 +22,6 @@ cd nanovllm/custom && python setup.py instal
 python example.py --custom_kernel
 ```
 
-**运行结果：**
-
-![alt text](fig/image.png)
-
 ### 3. 运行benchmark
 
 ```bash
