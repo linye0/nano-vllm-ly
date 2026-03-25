@@ -85,7 +85,7 @@ void run_custom_flash_attn_decode(
     int head_dim = q.size(3);
 
     int partition_size = 256;
-    int max_context_len = cache_seqlens.max().item<int>();
+    int max_context_len = max_blocks_per_seq * block_size;
     int num_splits = (max_context_len + partition_size - 1) / partition_size;
     if (num_splits < 1) num_splits = 1;
 
