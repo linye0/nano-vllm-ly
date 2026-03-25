@@ -16,13 +16,33 @@
 cd nanovllm/custom && python setup.py instal
 ```
 
-### 2. 运行基础示例
+### 2. 运行example
 
 ```bash
 python example.py --custom_kernel
 ```
 
-运行结果：
+**运行结果：**
 
 ![alt text](fig/image.png)
 
+### 3. 运行benchmark
+
+```bash
+python bench.py --custom_kernel
+```
+
+**测试配置：**
+
+* **硬件：** Lenovo R9000P 笔记本 (例如 RTX 3060 6GB)
+* **模型：** Qwen3-0.6B
+* **总请求数：** 256 条序列
+* **输入长度：** 随机采样，范围 100–1024 Tokens
+* **输出长度：** 随机采样，范围 100–1024 Tokens
+
+**性能测试结果：**
+
+| 推理引擎 | 输出 Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
+| :--- | :--- | :--- | :--- |
+| Nano-vLLM (原生 Triton 基线) | 133,966 | 124.11 | 1079.41 |
+| **Nano-vLLM (自定义 CUDA C++)** | **133,966** | **66.57** | **2012.33** |
