@@ -61,15 +61,19 @@ class BlockManager:
         h = -1
         cache_miss = False
         for i in range(seq.num_blocks):
+            # seq.block返回的是一个list，其中包含这个block划分当中的所有tokes
             token_ids = seq.block(i)
+            # prefix合并，查看有没有哪个块已经把seqs的前缀存起来了，如果有的话就合并存储，节省空间
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
             block_id = self.hash_to_block_id.get(h, -1)
+            # cache miss，增量分配
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 cache_miss = True
             if cache_miss:
                 block_id = self.free_block_ids[0]
                 block = self._allocate_block(block_id)
             else:
+            # cache hit，直接指定block并且把那个block的引用计数+1
                 seq.num_cached_tokens += self.block_size
                 if block_id in self.used_block_ids:
                     block = self.blocks[block_id]
@@ -94,13 +98,16 @@ class BlockManager:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
     def may_append(self, seq: Sequence):
+        # 注意blockmanager这边是不负责具体写入block的，只负责分配空间
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
+        # 如果需要分配新的block，那么就分配一个新的
         if len(seq) % self.block_size == 1:
             assert last_block.hash != -1
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
+        # 如果正好满了，那么就“封箱”
         elif len(seq) % self.block_size == 0:
             assert last_block.hash == -1
             token_ids = seq.block(seq.num_blocks-1)
@@ -109,4 +116,5 @@ class BlockManager:
             last_block.update(h, token_ids)
             self.hash_to_block_id[h] = last_block.block_id
         else:
+        # 如果两种都不是，那么是block内部的子序列长度增长，对于blockmanager来说可以什么都不做
             assert last_block.hash == -1
