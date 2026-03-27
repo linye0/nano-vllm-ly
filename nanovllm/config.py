@@ -18,6 +18,7 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     custom_kernel: bool = False
+    chunked_prefill: bool = False
 
     def __post_init__(self):
         self.model = os.path.expanduser(self.model)
@@ -32,13 +33,18 @@ cfg: Optional[Config] = None
 
 def init_cfg(args) -> Config:
     global cfg
-    cli_val = getattr(args, "custom_kernel", False)
-    
     cfg = Config(
         model=args.model,
         # 使用 getattr(对象, 属性名, 默认值) 替代直接点号访问
         enforce_eager=getattr(args, "enforce_eager", False),
         tensor_parallel_size=getattr(args, "tensor_parallel_size", 1), # 安全读取
-        custom_kernel=cli_val
+        custom_kernel=getattr(args, "custom_kernel", False),
+        chunked_prefill=getattr(args, "chunked_prefill", False)
     )
     return cfg
+
+def is_chunked_prefill() -> bool:
+    return getattr(cfg, "chunked_prefill", False)
+
+def use_custom_kernel() -> bool:
+    return getattr(cfg, "custom_kernel", False)

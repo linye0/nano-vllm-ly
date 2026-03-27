@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--enforce_eager", action="store_true", default=False)
     parser.add_argument("--num_seqs", type=int, default=256)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--chunked_prefill", action="store_true", help="Use custom chunked prefill")
 
     args = parser.parse_args()
 

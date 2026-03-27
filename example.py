@@ -12,8 +12,9 @@ def main():
     parser.add_argument("--custom_kernel", action="store_true", help="Use custom prefill kernel")
     parser.add_argument("--enforce_eager", action="store_true", default=True)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--chunked_prefill", action="store_true", help="Use custom chunked prefill")
     
-    args = parser.parse_args()
+    args = parser.parse_args()  
 
     cfg = config.init_cfg(args)
 

@@ -3,19 +3,18 @@ from enum import Enum, auto
 from itertools import count
 
 from nanovllm.sampling_params import SamplingParams
-
+from nanovllm.config import is_chunked_prefill
 
 class SequenceStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     FINISHED = auto()
 
-
 class Sequence:
-    block_size = 256
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    def __init__(self, token_ids: list[int], sampling_params = SamplingParams(), block_size=256):
+        self.block_size = block_size
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
@@ -27,6 +26,10 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        # chunked prefill attribute
+        self.num_computed_tokens = 0
+        self.cur_chunk_size = None
+        self.orig_prompt_len = self.num_prompt_tokens
 
     def __len__(self):
         return self.num_tokens
@@ -39,6 +42,10 @@ class Sequence:
         return self.status == SequenceStatus.FINISHED
 
     @property
+    def completion_token_ids(self):
+        return self.token_ids[self.orig_prompt_len:]
+
+    @property
     def num_completion_tokens(self):
         return self.num_tokens - self.num_prompt_tokens
 
@@ -46,9 +53,11 @@ class Sequence:
     def prompt_token_ids(self):
         return self.token_ids[:self.num_prompt_tokens]
 
+    """
     @property
     def completion_token_ids(self):
         return self.token_ids[self.num_prompt_tokens:]
+    """
 
     @property
     def num_cached_blocks(self):
@@ -62,6 +71,19 @@ class Sequence:
     def last_block_num_tokens(self):
         return self.num_tokens - (self.num_blocks - 1) * self.block_size
 
+    @property
+    def is_prefill_finished(self) -> bool:
+        return self.num_computed_tokens >= self.num_prompt_tokens
+    
+    @property
+    def num_pending_prefill_tokens(self) -> int:
+        return max(0, self.num_prompt_tokens - self.num_computed_tokens)
+
+    def get_next_prefill_chunk(self, max_chunk_size:int) -> list[int]:
+        start = self.num_computed_tokens
+        end = min(start + max_chunk_size, self.num_prompt_tokens) 
+        return self.token_ids[start:end]
+
     def block(self, i):
         assert 0 <= i < self.num_blocks
         return self.token_ids[i*self.block_size: (i+1)*self.block_size]
@@ -72,11 +94,13 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, 
+                self.block_table, self.num_computed_tokens,
                 self.token_ids if self.num_completion_tokens == 0 else self.last_token)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table, self.num_computed_tokens = state[:-1]
+
         if self.num_completion_tokens == 0:
             self.token_ids = state[-1]
         else:

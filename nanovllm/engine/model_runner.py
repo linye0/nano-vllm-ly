@@ -4,7 +4,7 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
-from nanovllm.config import Config
+from nanovllm.config import Config, is_chunked_prefill
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
@@ -123,6 +123,61 @@ class ModelRunner:
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
+    def prepare_chunked_prefill(self, seqs: list[Sequence]):
+        input_ids = []
+        positions = []
+        cu_seqlens_q = [0]
+        cu_seqlens_k = [0]
+        max_seqlen_q = 0
+        max_seqlen_k = 0
+        slot_mapping = []
+        
+        # 默认必须为 None，防止触发空张量替换
+        block_tables = None 
+
+        for seq in seqs:
+            # 兼容 Warmup：预热阶段序列没进过调度器，cur_chunk_size 不存在，此时退化为全量长度
+            chunk_start = seq.num_computed_tokens
+            chunk_size = seq.cur_chunk_size if seq.cur_chunk_size is not None else (len(seq) - chunk_start)
+            chunk_end = chunk_start + chunk_size
+
+            input_ids.extend(seq[chunk_start:chunk_end])
+            positions.extend(list(range(chunk_start, chunk_end)))
+
+            seqlen_q = chunk_size
+            seqlen_k = chunk_end  
+            
+            cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
+            cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
+            
+            max_seqlen_q = max(seqlen_q, max_seqlen_q)
+            max_seqlen_k = max(seqlen_k, max_seqlen_k)
+
+            # 兼容 Warmup：预热阶段没有分配物理块，直接跳过 slot_mapping 的计算
+            if not seq.block_table:
+                continue
+
+            for i in range(chunk_start, chunk_end):
+                logical_block_idx = i // self.block_size
+                block_offset = i % self.block_size
+                physical_block_id = seq.block_table[logical_block_idx]
+                slot_mapping.append(physical_block_id * self.block_size + block_offset)
+
+        # 核心恢复：只有在【存在真实历史上下文】（无论是 Decode 还是 Chunked 的后半段）时
+        # 我们才需要通知底层开启 PagedAttention (提供 block_tables)。
+        # 如果 cu_seqlens_k == cu_seqlens_q，说明当前 Batch 全是纯净的第一跳 Prefill，无需挂载 Cache！
+        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:
+            block_tables = self.prepare_block_tables(seqs)
+
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        
+        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+        return input_ids, positions
+
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
@@ -206,7 +261,10 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+        if is_chunked_prefill():
+            input_ids, positions = self.prepare_chunked_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+        else:
+            input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
