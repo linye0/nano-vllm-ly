@@ -1,8 +1,8 @@
 import os
+import argparse
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from nanovllm import config
-import argparse
 
 def main():
     parser = argparse.ArgumentParser()
@@ -16,20 +16,19 @@ def main():
     cfg = config.init_cfg(args)
 
     if cfg.custom_kernel:
-        print("[INFO] use CUSTOM kernel.")
+        print("[INFO] Use CUSTOM kernel.")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model)
-    # 初始化 LLM 引擎，此时系统会根据 6GB 显存分配固定的 KV Cache 物理块
+    # 初始化 LLM 引擎
     llm = LLM(cfg.model, enforce_eager=cfg.enforce_eager, tensor_parallel_size=cfg.tensor_parallel_size)
 
-    # 我们不需要它生成很长，我们要的是它在 Prefill 阶段就立刻暴毙
     sampling_params = SamplingParams(temperature=0.6, max_tokens=10)
     
-    # 制造“挤爆”显存的极端输入：单条请求约 10,000 个单词
-    # Qwen-0.6B 的隐藏层较小，但 4 个 10k 长度的请求并发，足以击穿 6GB 显存
-    base_text = "The quick brown fox jumps over the lazy dog. " * 15000 
+    # 【黄金规模】：单条约 27.5k Token，总计约 110k Token
+    # 这个规模下，Legacy 模式计算 2.7w 长度的中间张量会瞬间击穿 6GB 显存
+    # 而 Chunked 模式由于每次只算 256，能平稳把 KV Cache 填满到 5GB 左右并运行成功
+    base_text = "The quick brown fox jumps over the lazy dog. " * 2500 
     
-    # 构造并发 Batch
     prompts = [
         f"Please summarize the following text: {base_text}",
         f"What is the main idea of this story? {base_text}",
@@ -46,15 +45,13 @@ def main():
         for prompt in prompts
     ]
     
-    print(f"\n[WARNING] Ready to send {len(prompts)} long requests...")
-    print(f"[WARNING] Each has 15,000 Tokens.")
+    print(f"\n[INFO] Scale Target: ~27,500 Tokens per request.")
+    print(f"[INFO] Total Batch: ~110,000 Tokens. (Fits in 6GB KV Cache, but kills Legacy Activations)\n")
     
-    # 这里将触发灾难
     outputs = llm.generate(prompts, sampling_params)
 
-    for prompt, output in zip(prompts, outputs):
-        print("\n")
-        print(f"Completion: {output['text']!r}")
+    for i, output in enumerate(outputs):
+        print(f"Request {i} Completion: {output['text']!r}")
 
 if __name__ == "__main__":
     main()

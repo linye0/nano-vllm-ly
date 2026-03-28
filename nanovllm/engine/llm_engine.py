@@ -50,6 +50,16 @@ class LLMEngine:
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
+
+        # fix：如果由于显存极度紧张导致本轮调度不出任何任务
+        if not seqs:
+            # 如果队列里还有东西，说明是死锁了，需要体面报错
+            if self.scheduler.waiting or self.scheduler.running:
+                print("\n[VRAM ALERT] Memory is too tight to schedule even one block. Wait or preemption may occur.")
+                return [], 0
+            return [], 0 # 正常结束
+
+        token_ids = self.model_runner.call("run", seqs, is_prefill)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         if is_chunked_prefill():
             self.scheduler.postprocess_chunked(seqs, token_ids) 
