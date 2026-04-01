@@ -6,7 +6,11 @@
 
 这是一个基于[nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)魔改的轻量级大模型推理引擎。
 
-本项目的核心贡献在于实现并集成了一个手写的、基于 CUDA WMMA (Tensor Core) 的高性能 BFloat16 Prefill 注意力算子。通过这个算子，成功打通了从底层硬件寄存器布局到高层 Paged Attention 推理框架的全链路。
+本项目的核心贡献在于:
+
+1. 实现并集成了一个手写的、基于 CUDA WMMA (Tensor Core) 的高性能 BFloat16 Prefill 注意力算子。通过这个算子，成功打通了从底层硬件寄存器布局到高层 Paged Attention 推理框架的全链路。
+
+2. 集成了 Chunked Prefill 策略，改进了调度器的调度逻辑，使得突发长文本场景对用户的体验影响更小。
 
 ## 快速开始
 
@@ -26,7 +30,8 @@ cd nanovllm/custom && python setup.py instal
 python example.py --custom_kernel
 ```
 
-### 3. Custom Flash-attention Kernel 和原生 Kernel 的性能对比
+## 魔改功能性能测试
+### 1. Custom Flash-attention Kernel 和原生 Kernel 的性能对比
 
 使用bench.py进行测试：
 
@@ -53,7 +58,7 @@ python bench.py --custom_kernel
 
 通过将原生的 Triton 实现替换为深度定制的 CUDA C++ 算子，在相同硬件下，端到端 Decoding 阶段的吞吐量提升了约 86.4%。
 
-### 4. Chunked Prefill 和原生调度策略的性能对比
+### 2. Chunked Prefill 和原生调度策略的性能对比
 
 采用test_latency.py进行测试：
 
