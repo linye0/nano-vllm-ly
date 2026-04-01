@@ -73,11 +73,11 @@ class Sequence:
 
     @property
     def is_prefill_finished(self) -> bool:
-        return self.num_computed_tokens >= self.num_prompt_tokens
+        return self.num_computed_tokens >= self.orig_prompt_len
     
     @property
     def num_pending_prefill_tokens(self) -> int:
-        return max(0, self.num_prompt_tokens - self.num_computed_tokens)
+        return max(0, self.orig_prompt_len - self.num_computed_tokens)
 
     def get_next_prefill_chunk(self, max_chunk_size:int) -> list[int]:
         start = self.num_computed_tokens

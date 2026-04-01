@@ -165,7 +165,7 @@ class ModelRunner:
                 physical_block_id = seq.block_table[logical_block_idx]
                 slot_mapping.append(physical_block_id * self.block_size + block_offset)
 
-        # 核心恢复：只有在【存在真实历史上下文】（无论是 Decode 还是 Chunked 的后半段）时
+        # 只有在【存在真实历史上下文】（无论是 Decode 还是 Chunked 的后半段）时
         # 我们才需要通知底层开启 PagedAttention (提供 block_tables)。
         # 如果 cu_seqlens_k == cu_seqlens_q，说明当前 Batch 全是纯净的第一跳 Prefill，无需挂载 Cache！
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:

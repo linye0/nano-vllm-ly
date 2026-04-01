@@ -24,10 +24,7 @@ def main():
 
     sampling_params = SamplingParams(temperature=0.6, max_tokens=10)
     
-    # 【黄金规模】：单条约 27.5k Token，总计约 110k Token
-    # 这个规模下，Legacy 模式计算 2.7w 长度的中间张量会瞬间击穿 6GB 显存
-    # 而 Chunked 模式由于每次只算 256，能平稳把 KV Cache 填满到 5GB 左右并运行成功
-    base_text = "The quick brown fox jumps over the lazy dog. " * 2500 
+    base_text = "The quick brown fox jumps over the lazy dog. " * 2500
     
     prompts = [
         f"Please summarize the following text: {base_text}",

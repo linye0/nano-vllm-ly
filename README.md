@@ -26,7 +26,9 @@ cd nanovllm/custom && python setup.py instal
 python example.py --custom_kernel
 ```
 
-### 3. 运行benchmark
+### 3. Custom Flash-attention Kernel 和原生 Kernel 的性能对比
+
+使用bench.py进行测试：
 
 ```bash
 python bench.py --custom_kernel
@@ -50,3 +52,30 @@ python bench.py --custom_kernel
 **结果分析：**
 
 通过将原生的 Triton 实现替换为深度定制的 CUDA C++ 算子，在相同硬件下，端到端 Decoding 阶段的吞吐量提升了约 86.4%。
+
+### 4. Chunked Prefill 和原生调度策略的性能对比
+
+采用test_latency.py进行测试：
+
+```python
+# 运行原生策略
+python test_latency.py
+# 运行chunked_prefill
+python test_latency.py --chunked_prefill
+```
+
+本节通过模拟“突发长文本请求”场景，测试 nano-vllm 在不同调度策略下的引擎相应延迟，验证chunked prefill策略系统 SLA 的保护能力:
+
+- 用户 A (延迟敏感型)：发送短请求（30 tokens），模拟连续对话，系统处于 Decode (生成) 阶段。
+
+- 用户 B (吞吐密集型)：在用户 A 正常吐字时，突然注入一个 14,001 Tokens 的长文本请求，模拟长文档分析。
+
+- 对比指标：逐步记录引擎 step() 函数的物理执行时间（ms）。
+
+结果如下所示：
+
+![chunked prefill](fig/image.png)
+
+在第 4 步长文本请求注入时，Legacy Prefill 产生了高达 1622.8ms 的延迟峰值；而 Chunked Prefill 将该峰值压制在了 1301.2ms。
+
+虽然在对数坐标下两者看似接近，但物理时间上 Legacy 模式的阻塞感明显更强。更重要的是，Legacy 模式在处理完大块 Prefill 后，后续步骤出现了明显的延迟波动，而 Chunked 模式则表现得极为平滑。这证明了算力切片有效地将计算压力“揉碎”到了多个时间片中。

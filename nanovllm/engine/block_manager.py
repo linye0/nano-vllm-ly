@@ -152,7 +152,12 @@ class BlockManager:
             
             if cached_block_id != -1 and self.blocks[cached_block_id].token_ids == token_ids and cached_block_id != current_block_id:
                 if cached_block_id in self.used_block_ids:
-                    self._deallocate_block(current_block_id)
+                    # 【核心修复】：在归还给空闲池之前，必须先剥夺当前序列对它的引用！
+                    block.ref_count -= 1
+                    if block.ref_count == 0:
+                        self._deallocate_block(current_block_id)
+                    
+                    # 换上命中的缓存块，并增加缓存块的引用
                     seq.block_table[i] = cached_block_id
                     self.blocks[cached_block_id].ref_count += 1
                 else:

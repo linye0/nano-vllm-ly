@@ -51,7 +51,6 @@ class LLMEngine:
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
 
-        # fix：如果由于显存极度紧张导致本轮调度不出任何任务
         if not seqs:
             # 如果队列里还有东西，说明是死锁了，需要体面报错
             if self.scheduler.waiting or self.scheduler.running:
@@ -59,7 +58,6 @@ class LLMEngine:
                 return [], 0
             return [], 0 # 正常结束
 
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         if is_chunked_prefill():
             self.scheduler.postprocess_chunked(seqs, token_ids) 
@@ -79,6 +77,9 @@ class LLMEngine:
 
     def is_finished(self):
         return self.scheduler.is_finished()
+
+    def is_deadlock(self):
+        return self.scheduler.is_deadlock()
 
     def generate(
         self,
@@ -110,6 +111,9 @@ class LLMEngine:
                 outputs[seq_id] = token_ids
                 if use_tqdm:
                     pbar.update(1)
+        if self.is_deadlock():
+            print("[Error] Dead lock occurs.")
+            return []
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         if use_tqdm:
