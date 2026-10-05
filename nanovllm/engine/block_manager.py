@@ -71,11 +71,14 @@ class BlockManager:
     def _allocate_init(self, seq: Sequence, chunk_size: int = None) -> int:
         assert not seq.block_table
         matched_tokens = 0
+        matched_blocks = 0
+        # Always recompute at least the final prompt block. A fully cached
+        # prompt has KV state but no cached logits for sampling the next token.
+        cacheable_blocks = max(0, seq.num_blocks - 1)
 
         if chunk_size is not None:
-            matched_blocks = 0
             h = -1
-            for i in range(seq.num_blocks):
+            for i in range(cacheable_blocks):
                 token_ids = seq.block(i)
                 if len(token_ids) != self.block_size:
                     break
@@ -88,9 +91,11 @@ class BlockManager:
             
             matched_tokens = matched_blocks * self.block_size
             needed_total_tokens = matched_tokens + chunk_size
-            num_blocks_to_process = (needed_total_tokens + self.block_size - 1) // self.block_size
+            num_blocks_to_process = min(seq.num_blocks, (needed_total_tokens + self.block_size - 1) // self.block_size)
+            allowed_cache_blocks = matched_blocks
         else:
             num_blocks_to_process = seq.num_blocks
+            allowed_cache_blocks = cacheable_blocks
 
         h = -1
         cache_miss = False
@@ -102,6 +107,9 @@ class BlockManager:
                 block_id = self.hash_to_block_id.get(h, -1)
             else:
                 h = -1
+                block_id = -1
+
+            if i >= allowed_cache_blocks:
                 block_id = -1
 
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:

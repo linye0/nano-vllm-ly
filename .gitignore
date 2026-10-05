@@ -1,5 +1,7 @@
 # lockedcore
 result/*
+benchmarks/results/*.csv
+benchmarks/results/*.json
 test_oom.py
 test_profiler.py
 visualize_result.py

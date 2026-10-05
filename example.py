@@ -1,34 +1,28 @@
-import os
-from nanovllm import LLM, SamplingParams
-from transformers import AutoTokenizer
-from nanovllm import config
 import argparse
 
+from transformers import AutoTokenizer
+
+from nanovllm import LLM, SamplingParams
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run a small nano-vLLM generation example.")
+    parser.add_argument("--model", default="~/huggingface/Qwen3-0.6B")
+    parser.add_argument("--custom-kernel", action="store_true")
+    parser.add_argument("--chunked-prefill", action="store_true")
+    parser.add_argument("--prefill-chunk-size", type=int, default=256)
+    parser.add_argument("--max-num-batched-tokens", type=int, default=4096)
+    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--max-tokens", type=int, default=64)
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="~/huggingface/Qwen3-0.6B/")
-    parser.add_argument("--custom_kernel", action="store_true", help="Use custom prefill kernel")
-    parser.add_argument("--enforce_eager", action="store_true", default=True)
-    parser.add_argument("--tensor_parallel_size", type=int, default=1)
-    parser.add_argument("--chunked_prefill", action="store_true", help="Use custom chunked prefill")
-    
-    args = parser.parse_args()  
-
-    cfg = config.init_cfg(args)
-
-    if cfg.custom_kernel:
-        print("[INFO] Use custom prefill kernel")
-
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model)
-    llm = LLM(cfg.model, enforce_eager=cfg.enforce_eager, tensor_parallel_size=cfg.tensor_parallel_size)
-
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
-    prompts = [
-        "introduce yourself",
-        "list all prime numbers within 100",
-    ]
+    args = parse_args()
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    prompts = ["Introduce yourself.", "List all prime numbers below 100."]
     prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
@@ -37,11 +31,21 @@ def main():
         )
         for prompt in prompts
     ]
-    outputs = llm.generate(prompts, sampling_params)
+
+    with LLM(
+        args.model,
+        custom_kernel=args.custom_kernel,
+        chunked_prefill=args.chunked_prefill,
+        prefill_chunk_size=args.prefill_chunk_size,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        max_model_len=args.max_model_len,
+        tensor_parallel_size=args.tensor_parallel_size,
+        enforce_eager=args.enforce_eager,
+    ) as llm:
+        outputs = llm.generate(prompts, SamplingParams(temperature=0.6, max_tokens=args.max_tokens))
 
     for prompt, output in zip(prompts, outputs):
-        print("\n")
-        print(f"Prompt: {prompt!r}")
+        print(f"\nPrompt: {prompt!r}")
         print(f"Completion: {output['text']!r}")
 
 

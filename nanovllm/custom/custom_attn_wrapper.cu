@@ -1,4 +1,7 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 
@@ -21,7 +24,18 @@ void run_custom_flash_attn_prefill(
     int block_size,
     int max_blocks_per_seq
 ) {
-    TORCH_CHECK(q.dtype() == torch::kBFloat16, "q must be bfloat16");
+    TORCH_CHECK(q.is_cuda() && k_cache.is_cuda() && v_cache.is_cuda() && out.is_cuda(), "attention tensors must be CUDA tensors");
+    TORCH_CHECK(q.device() == k_cache.device() && q.device() == v_cache.device() && q.device() == out.device(), "attention tensors must be on one device");
+    TORCH_CHECK(q.dtype() == torch::kBFloat16 && k_cache.dtype() == torch::kBFloat16 && v_cache.dtype() == torch::kBFloat16 && out.dtype() == torch::kBFloat16, "Q/K/V/out must be bfloat16");
+    TORCH_CHECK(out.sizes() == q.sizes(), "output shape must match Q");
+    TORCH_CHECK(q.dim() == 3 && k_cache.dim() >= 3 && v_cache.sizes() == k_cache.sizes(), "invalid prefill tensor shapes");
+    TORCH_CHECK(q.stride(-1) == 1 && k_cache.stride(-1) == 1 && v_cache.stride(-1) == 1, "last dimension must be contiguous");
+    TORCH_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_k.is_cuda(), "sequence offsets must be CUDA tensors");
+    TORCH_CHECK(cu_seqlens_q.device() == q.device() && cu_seqlens_k.device() == q.device(), "sequence offsets must be on the Q device");
+    TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32 && cu_seqlens_k.dtype() == torch::kInt32, "sequence offsets must be int32");
+    TORCH_CHECK(!is_paged || (block_table.is_cuda() && block_table.device() == q.device() && block_table.dtype() == torch::kInt32), "paged block table must be int32 on the Q device");
+    c10::cuda::CUDAGuard device_guard(q.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
     
     int batch_size = cu_seqlens_q.size(0) - 1;
     int head_dim = q.size(2);
@@ -47,20 +61,21 @@ void run_custom_flash_attn_prefill(
     const int* bt_ptr = is_paged? block_table.data_ptr<int>() : nullptr;
 
     if (head_dim == 128) {
-        cudaFuncSetAttribute(flash_attn_prefill_kernel<128, 64, 32>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-        flash_attn_prefill_kernel<128, 64, 32><<<grid, block, smem_bytes>>>(
+        C10_CUDA_CHECK(cudaFuncSetAttribute(flash_attn_prefill_kernel<128, 64, 32>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        flash_attn_prefill_kernel<128, 64, 32><<<grid, block, smem_bytes, stream>>>(
             q_ptr, k_ptr, v_ptr, o_ptr, cu_q_ptr, cu_k_ptr, bt_ptr,
             scale, num_heads, num_kv_heads, block_size, max_blocks_per_seq
         );
     } else if (head_dim == 64) {
-        cudaFuncSetAttribute(flash_attn_prefill_kernel<64, 64, 32>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-        flash_attn_prefill_kernel<64, 64, 32><<<grid, block, smem_bytes>>>(
+        C10_CUDA_CHECK(cudaFuncSetAttribute(flash_attn_prefill_kernel<64, 64, 32>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        flash_attn_prefill_kernel<64, 64, 32><<<grid, block, smem_bytes, stream>>>(
             q_ptr, k_ptr, v_ptr, o_ptr, cu_q_ptr, cu_k_ptr, bt_ptr,
             scale, num_heads, num_kv_heads, block_size, max_blocks_per_seq
         );
     } else {
         TORCH_CHECK(false, "Unsupported head dimension. Only 64 and 128 are supported.");
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void run_custom_flash_attn_decode(
@@ -76,13 +91,23 @@ void run_custom_flash_attn_decode(
     int block_size,
     int max_blocks_per_seq
 ) {   
-    TORCH_CHECK(q.dtype() == torch::kBFloat16, "q must be bfloat16");
+    TORCH_CHECK(q.is_cuda() && k_cache.is_cuda() && v_cache.is_cuda() && out.is_cuda(), "attention tensors must be CUDA tensors");
+    TORCH_CHECK(q.device() == k_cache.device() && q.device() == v_cache.device() && q.device() == out.device(), "attention tensors must be on one device");
+    TORCH_CHECK(q.dtype() == torch::kBFloat16 && k_cache.dtype() == torch::kBFloat16 && v_cache.dtype() == torch::kBFloat16 && out.dtype() == torch::kBFloat16, "Q/K/V/out must be bfloat16");
+    TORCH_CHECK(out.sizes() == q.sizes(), "output shape must match Q");
     TORCH_CHECK(q.dim() == 4, "Input Q must be 4D (batch, seqlen, n_heads, head_dim)");
     TORCH_CHECK(q.size(1) == 1, "Decode kernel only supports seq_len=1");
+    TORCH_CHECK(block_table.defined() && block_table.numel() > 0, "block_table is required for decode");
+    TORCH_CHECK(cache_seqlens.is_cuda() && block_table.is_cuda(), "decode metadata must be CUDA tensors");
+    TORCH_CHECK(cache_seqlens.device() == q.device() && block_table.device() == q.device(), "decode metadata must be on the Q device");
+    TORCH_CHECK(cache_seqlens.dtype() == torch::kInt32 && block_table.dtype() == torch::kInt32, "decode metadata must be int32");
+    c10::cuda::CUDAGuard device_guard(q.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
 
     int batch_size = q.size(0);
     int seqlen = q.size(1); // 一定为1
     int head_dim = q.size(3);
+    TORCH_CHECK(head_dim == 64 || head_dim == 128, "Unsupported head dimension. Only 64 and 128 are supported.");
 
     int partition_size = 256;
     int max_context_len = max_blocks_per_seq * block_size;
@@ -99,7 +124,7 @@ void run_custom_flash_attn_decode(
     size_t smem_bytes = head_dim * sizeof(__nv_bfloat16);
 
     if (head_dim == 64) {
-        flash_attn_decode_partial_kernel<64, 256><<<grid_stage1, block_stage1, smem_bytes>>>(
+        flash_attn_decode_partial_kernel<64, 256><<<grid_stage1, block_stage1, smem_bytes, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()), // 显式转为 BF16 指针
             reinterpret_cast<const __nv_bfloat16*>(k_cache.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(v_cache.data_ptr()),
@@ -112,7 +137,7 @@ void run_custom_flash_attn_decode(
             scale
         );
     } else if (head_dim == 128) {
-        flash_attn_decode_partial_kernel<128, 256><<<grid_stage1, block_stage1, smem_bytes>>>(
+        flash_attn_decode_partial_kernel<128, 256><<<grid_stage1, block_stage1, smem_bytes, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()), // 显式转为 BF16 指针
             reinterpret_cast<const __nv_bfloat16*>(k_cache.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(v_cache.data_ptr()),
@@ -125,12 +150,13 @@ void run_custom_flash_attn_decode(
             scale
         );
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     dim3 grid_stage2(batch_size, n_heads);
     dim3 block_stage2(head_dim);
 
     if (head_dim == 64) {
-        flash_attn_decode_reduce_kernel<64><<<grid_stage2, block_stage2>>>(
+        flash_attn_decode_reduce_kernel<64><<<grid_stage2, block_stage2, 0, stream>>>(
             tmp_out.data_ptr<float>(),
             tmp_lse.data_ptr<float>(),
             reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
@@ -138,7 +164,7 @@ void run_custom_flash_attn_decode(
             n_heads
         );
     } else if (head_dim == 128) {
-        flash_attn_decode_reduce_kernel<128><<<grid_stage2, block_stage2>>>(
+        flash_attn_decode_reduce_kernel<128><<<grid_stage2, block_stage2, 0, stream>>>(
             tmp_out.data_ptr<float>(),
             tmp_lse.data_ptr<float>(),
             reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
@@ -146,6 +172,7 @@ void run_custom_flash_attn_decode(
             n_heads
         );
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 PYBIND11_MODULE(custom_attention_ext, m) {

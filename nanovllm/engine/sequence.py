@@ -3,7 +3,6 @@ from enum import Enum, auto
 from itertools import count
 
 from nanovllm.sampling_params import SamplingParams
-from nanovllm.config import is_chunked_prefill
 
 class SequenceStatus(Enum):
     WAITING = auto()
@@ -13,7 +12,10 @@ class SequenceStatus(Enum):
 class Sequence:
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams(), block_size=256):
+    def __init__(self, token_ids: list[int], sampling_params: SamplingParams | None = None, block_size=256):
+        if not token_ids:
+            raise ValueError("a sequence must contain at least one token")
+        sampling_params = sampling_params or SamplingParams()
         self.block_size = block_size
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
@@ -53,12 +55,6 @@ class Sequence:
     def prompt_token_ids(self):
         return self.token_ids[:self.num_prompt_tokens]
 
-    """
-    @property
-    def completion_token_ids(self):
-        return self.token_ids[self.num_prompt_tokens:]
-    """
-
     @property
     def num_cached_blocks(self):
         return self.num_cached_tokens // self.block_size
@@ -73,11 +69,11 @@ class Sequence:
 
     @property
     def is_prefill_finished(self) -> bool:
-        return self.num_computed_tokens >= self.orig_prompt_len
+        return self.num_computed_tokens >= self.num_prompt_tokens
     
     @property
     def num_pending_prefill_tokens(self) -> int:
-        return max(0, self.orig_prompt_len - self.num_computed_tokens)
+        return max(0, self.num_prompt_tokens - self.num_computed_tokens)
 
     def get_next_prefill_chunk(self, max_chunk_size:int) -> list[int]:
         start = self.num_computed_tokens
@@ -95,11 +91,12 @@ class Sequence:
 
     def __getstate__(self):
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, 
-                self.block_table, self.num_computed_tokens,
+                self.block_table, self.num_computed_tokens, self.cur_chunk_size,
                 self.token_ids if self.num_completion_tokens == 0 else self.last_token)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table, self.num_computed_tokens = state[:-1]
+        (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens,
+         self.block_table, self.num_computed_tokens, self.cur_chunk_size) = state[:-1]
 
         if self.num_completion_tokens == 0:
             self.token_ids = state[-1]

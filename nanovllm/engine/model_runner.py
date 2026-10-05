@@ -4,7 +4,7 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
-from nanovllm.config import Config, is_chunked_prefill
+from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
@@ -22,12 +22,14 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
+        self.chunked_prefill = config.chunked_prefill
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
+        hf_config.custom_kernel = config.custom_kernel
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
@@ -91,9 +93,19 @@ class ModelRunner:
     def warmup_model(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
+        if self.chunked_prefill:
+            warmup_len = min(
+                self.config.prefill_chunk_size,
+                self.config.max_num_batched_tokens,
+                self.config.max_model_len,
+            )
+        else:
+            warmup_len = self.config.max_model_len
+        num_seqs = min(
+            max(1, self.config.max_num_batched_tokens // warmup_len),
+            self.config.max_num_seqs,
+        )
+        seqs = [Sequence([0] * warmup_len) for _ in range(num_seqs)]
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
@@ -263,7 +275,7 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        if is_chunked_prefill():
+        if self.chunked_prefill:
             input_ids, positions = self.prepare_chunked_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         else:
             input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)

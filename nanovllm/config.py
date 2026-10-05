@@ -1,8 +1,6 @@
 import os
 from dataclasses import dataclass
 from transformers import AutoConfig
-from typing import Optional
-import sys
 
 @dataclass
 class Config:
@@ -19,32 +17,33 @@ class Config:
     num_kvcache_blocks: int = -1
     custom_kernel: bool = False
     chunked_prefill: bool = False
+    prefill_chunk_size: int = 256
 
     def __post_init__(self):
         self.model = os.path.expanduser(self.model)
-        assert os.path.isdir(self.model), f"Model path not found: {self.model}"
-        assert self.kvcache_block_size % 256 == 0
-        assert 1 <= self.tensor_parallel_size <= 8
+        if not os.path.isdir(self.model):
+            raise FileNotFoundError(f"Model path not found: {self.model}")
+        if self.max_model_len <= 0:
+            raise ValueError("max_model_len must be positive")
+        if self.max_num_batched_tokens <= 0:
+            raise ValueError("max_num_batched_tokens must be positive")
+        if self.max_num_seqs <= 0:
+            raise ValueError("max_num_seqs must be positive")
+        if not 0 < self.gpu_memory_utilization < 1:
+            raise ValueError("gpu_memory_utilization must be between 0 and 1")
+        if self.kvcache_block_size <= 0 or self.kvcache_block_size % 256 != 0:
+            raise ValueError("kvcache_block_size must be a positive multiple of 256")
+        if not 1 <= self.tensor_parallel_size <= 8:
+            raise ValueError("tensor_parallel_size must be in [1, 8]")
+        if self.prefill_chunk_size <= 0:
+            raise ValueError("prefill_chunk_size must be positive")
+        if self.prefill_chunk_size > self.max_num_batched_tokens:
+            raise ValueError("prefill_chunk_size cannot exceed max_num_batched_tokens")
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
-        assert self.max_num_batched_tokens >= self.max_model_len
-
-cfg: Optional[Config] = None
-
-def init_cfg(args) -> Config:
-    global cfg
-    cfg = Config(
-        model=args.model,
-        # 使用 getattr(对象, 属性名, 默认值) 替代直接点号访问
-        enforce_eager=getattr(args, "enforce_eager", False),
-        tensor_parallel_size=getattr(args, "tensor_parallel_size", 1), # 安全读取
-        custom_kernel=getattr(args, "custom_kernel", False),
-        chunked_prefill=getattr(args, "chunked_prefill", False)
-    )
-    return cfg
-
-def is_chunked_prefill() -> bool:
-    return getattr(cfg, "chunked_prefill", False)
-
-def use_custom_kernel() -> bool:
-    return getattr(cfg, "custom_kernel", False)
+        if not self.chunked_prefill and self.max_num_batched_tokens < self.max_model_len:
+            raise ValueError("legacy prefill requires max_num_batched_tokens >= max_model_len")
+        if self.custom_kernel:
+            head_dim = getattr(self.hf_config, "head_dim", self.hf_config.hidden_size // self.hf_config.num_attention_heads)
+            if head_dim not in (64, 128):
+                raise ValueError("custom attention supports head_dim 64 or 128 only")

@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nano-vllm"
-version = "0.2.0"
+version = "0.3.0"
 authors = [{ name = "Xingkai Yu" }]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-description = "a lightweight vLLM implementation built from scratch"
+description = "A compact LLM inference engine with chunked prefill and custom BF16 paged-attention kernels"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "torch>=2.4.0",
@@ -20,7 +20,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage="https://github.com/GeeeekExplorer/nano-vllm"
+Homepage = "https://github.com/linye0/nano-vllm-ly"
+Repository = "https://github.com/linye0/nano-vllm-ly"
+Upstream = "https://github.com/GeeeekExplorer/nano-vllm"
 
 [tool.setuptools.packages.find]
 where = ["."]

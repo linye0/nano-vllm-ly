@@ -1,86 +1,169 @@
 <p align="center">
-  <img src="fig/image-2.png" width="30%" />
+  <img src="fig/image-2.png" width="28%" alt="nano-vLLM logo" />
 </p>
 
-# Nano-VLLM-ly (Custom Edition)
+# nano-vLLM-ly
 
-这是一个基于[nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)魔改的轻量级大模型推理引擎。
+A compact LLM inference engine for studying production inference internals. This fork extends
+[nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) with a token-budgeted chunked-prefill
+scheduler and handwritten BF16 CUDA attention kernels for both prefill and paged decode.
 
-本项目的核心贡献在于:
+The project is intentionally small enough to read end to end: request scheduling, prefix caching,
+paged KV-cache allocation, tensor parallelism, CUDA Graph decode, model execution, and sampling are
+all visible in a few focused modules.
 
-1. 实现并集成了一个手写的、基于 CUDA WMMA (Tensor Core) 的高性能 BFloat16 Prefill 注意力算子。通过这个算子，成功打通了从底层硬件寄存器布局到高层 Paged Attention 推理框架的全链路。
+## Engineering highlights
 
-2. 集成了 Chunked Prefill 策略，改进了调度器的调度逻辑，使得突发长文本场景对用户的体验影响更小。
+- **Chunked prefill with decode priority.** Long prompts are split into configurable token chunks,
+  mixed with active decode requests, and bounded by a per-step token budget.
+- **Handwritten Tensor Core attention.** BF16 WMMA kernels implement variable-length causal
+  prefill, paged-KV chunk continuation, GQA, and partitioned paged decode.
+- **Backend adapter.** The same model path can select official FlashAttention or the custom CUDA
+  backend through an explicit `LLM(..., custom_kernel=True)` configuration—also in spawned tensor-
+  parallel workers.
+- **Paged KV cache and prefix reuse.** Logical sequence blocks map to physical cache pages with
+  reference counting and hash-based prefix matching. The final prompt block is deliberately
+  recomputed so a full cache hit still produces next-token logits.
+- **Reproducible validation.** CPU scheduler tests cover chunk boundaries, mixed batching,
+  preemption, token budgets, and prefix-cache edge cases. GPU tests compare custom kernels against
+  FlashAttention for unpaged prefill, non-contiguous paged prefill, decode, GQA, and non-default
+  CUDA streams.
 
-## 快速开始
+## Architecture
 
-### 1. 编译安装
-
-原生nano-vllm的配置请参考[原repo](https://github.com/GeeeekExplorer/nano-vllm).
-
-要使用自定义的kernel，首先需要编译并安装 CUDA 扩展包：
-
-```bash
-cd nanovllm/custom && python setup.py instal
+```text
+prompts -> Scheduler -----> ModelRunner -> Qwen3 -> Sampler -> token outputs
+             |                  |
+             v                  v
+        BlockManager       Attention backend
+        (paged KV +        (FlashAttention or
+         prefix cache)      custom CUDA/WMMA)
 ```
 
-### 2. 运行example
+Chunked mode treats `max_num_batched_tokens` as a hard step budget. Existing decode sequences are
+scheduled first at one token each; remaining capacity is assigned to prompt chunks no larger than
+`prefill_chunk_size`. See [architecture.md](docs/architecture.md) for state transitions and cache
+invariants.
+
+## Supported custom-kernel contract
+
+| Capability | Support |
+| --- | --- |
+| Data type | BF16 |
+| Head dimensions | 64, 128 |
+| Attention mask | Causal |
+| Query layout | Variable-length packed prefill; one-token decode |
+| KV layout | Contiguous or paged prefill; paged decode |
+| GQA/MQA | Yes, when query heads are divisible by KV heads |
+| Dropout / sliding window / ALiBi / softcap | Not implemented; rejected explicitly |
+
+Unsupported modes fail fast instead of silently falling back or producing ambiguous results.
+
+## Quick start
+
+Requirements: Linux, an NVIDIA GPU with BF16 Tensor Core support, CUDA toolkit, Python 3.10–3.12,
+and a local Hugging Face model. The validated development environment is an RTX 3060 Laptop GPU,
+PyTorch 2.5.1+cu121, CUDA toolkit 12.x, and Qwen3-0.6B.
 
 ```bash
-python example.py --custom_kernel
+python -m pip install -e .
+TORCH_CUDA_ARCH_LIST="8.6" python -m pip install -e nanovllm/custom --no-build-isolation
 ```
 
-## 魔改功能性能测试
-### 1. Custom Flash-attention Kernel 和原生 Kernel 的性能对比
-
-使用bench.py进行测试：
+Run the baseline or enable either extension explicitly:
 
 ```bash
-python bench.py --custom_kernel
+python example.py --model ~/huggingface/Qwen3-0.6B
+python example.py --model ~/huggingface/Qwen3-0.6B --chunked-prefill
+python example.py --model ~/huggingface/Qwen3-0.6B --chunked-prefill --custom-kernel
 ```
 
-**测试配置：**
-
-* **硬件：** RTX 3060 Laptop (6GB专用显存)
-* **模型：** Qwen3-0.6B
-* **总请求数：** 256 条序列
-* **输入长度：** 随机采样，范围 100–1024 Tokens
-* **输出长度：** 随机采样，范围 100–1024 Tokens
-
-**性能测试结果：**
-
-| 推理引擎 | 输出 Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
-| :--- | :--- | :--- | :--- |
-| Nano-vLLM (原生 Triton 基线) | 133,966 | 124.11 | 1079.41 |
-| **Nano-vLLM-ly (自定义 CUDA kernel)** | **133,966** | **66.57** | **2012.33** |
-
-**结果分析：**
-
-通过将原生的 Triton 实现替换为深度定制的 CUDA C++ 算子，在相同硬件下，端到端 Decoding 阶段的吞吐量提升了约 86.4%。
-
-### 2. Chunked Prefill 和原生调度策略的性能对比
-
-采用test_latency.py进行测试：
+Important engine options:
 
 ```python
-# 运行原生策略
-python test_latency.py
-# 运行chunked_prefill
-python test_latency.py --chunked_prefill
+from nanovllm import LLM
+
+llm = LLM(
+    "~/huggingface/Qwen3-0.6B",
+    chunked_prefill=True,
+    prefill_chunk_size=256,
+    max_num_batched_tokens=4096,
+    custom_kernel=True,
+)
 ```
 
-本节通过模拟“突发长文本请求”场景，测试 nano-vllm 在不同调度策略下的引擎相应延迟，验证chunked prefill策略系统 SLA 的保护能力:
+Configuration is carried by the engine instance rather than module-level globals, so each worker
+observes the same backend and scheduler policy.
 
-- 用户 A (延迟敏感型)：发送短请求（30 tokens），模拟连续对话，系统处于 Decode (生成) 阶段。
+## Validation
 
-- 用户 B (吞吐密集型)：在用户 A 正常吐字时，突然注入一个 14,001 Tokens 的长文本请求，模拟长文档分析。
+```bash
+# Scheduler/cache tests (no model execution)
+python -m unittest tests.test_scheduler -v
 
-- 对比指标：逐步记录引擎 step() 函数的物理执行时间（ms）。
+# CUDA kernel differential tests against official FlashAttention
+python -m unittest tests.test_custom_attention -v
 
-结果如下所示：
+# Syntax check for the complete repository
+python -m compileall -q nanovllm benchmarks tests
+```
 
-![chunked prefill](fig/image.png)
+On the validated RTX 3060 environment, the differential suite passes for BF16 GQA prefill and
+decode, including a 301-token context stored in non-contiguous physical pages. Observed maximum
+absolute error was at most `0.00390625` in prefill and `0.0009765625` in decode; tests use
+`atol=rtol=0.05` to account for BF16 accumulation/order differences. Full methodology and expected
+coverage are documented in [correctness.md](docs/correctness.md).
 
-在第 4 步长文本请求注入时，Legacy Prefill 产生了高达 1622.8ms 的延迟峰值；而 Chunked Prefill 将该峰值压制在了 1301.2ms。
+## Benchmarks
 
-虽然在对数坐标下两者看似接近，但物理时间上 Legacy 模式的阻塞感明显更强。更重要的是，Legacy 模式在处理完大块 Prefill 后，后续步骤出现了明显的延迟波动，而 Chunked 模式则表现得极为平滑。这证明了算力切片有效地将计算压力“揉碎”到了多个时间片中。
+The benchmark scripts print machine-readable JSON and accept explicit workload/configuration
+arguments:
+
+```bash
+# Kernel latency and numerical error
+python -m benchmarks.benchmark_attention
+
+# End-to-end output throughput
+python -m benchmarks.benchmark_throughput --num-seqs 32
+python -m benchmarks.benchmark_throughput --num-seqs 32 --custom-kernel
+
+# Decode interference from an arriving long prompt
+python -m benchmarks.benchmark_chunked_prefill \
+  --output benchmarks/results/legacy.csv
+python -m benchmarks.benchmark_chunked_prefill --chunked-prefill \
+  --output benchmarks/results/chunked.csv
+
+# Peak allocated memory
+python -m benchmarks.benchmark_memory --prompt-tokens 2048
+python -m benchmarks.benchmark_memory --prompt-tokens 2048 --chunked-prefill
+```
+
+Run alternatives in fresh processes, keep model/workload/seed identical, and report the generated
+JSON rather than a hand-copied best run. See [benchmarking.md](docs/benchmarking.md).
+An auditable single-machine validation snapshot, including negative results and trade-offs, is in
+[validated-results.md](docs/validated-results.md).
+
+## Repository map
+
+```text
+nanovllm/engine/       scheduler, sequence lifecycle, paged-block manager, model runner
+nanovllm/layers/       attention routing, KV-cache store, tensor-parallel layers
+nanovllm/custom/       Python adapter, PyTorch CUDA extension, WMMA kernels
+benchmarks/            kernel, throughput, latency-interference, and memory benchmarks
+tests/                 scheduler/cache unit tests and CUDA differential tests
+docs/                  architecture, correctness, benchmarking, and resume/interview notes
+```
+
+## Scope and limitations
+
+This is an educational inference engine, not a drop-in production server. It currently targets
+Qwen3-style decoder models, local/offline weights, single-node execution, and sampling-only output.
+It does not yet provide an HTTP serving layer, continuous request cancellation, quantization,
+speculative decoding, or distributed multi-node fault tolerance. These constraints are explicit so
+benchmark and resume claims remain defensible.
+
+## Lineage and license
+
+Based on [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm). The scheduler,
+chunked-prefill integration, custom CUDA attention path, validation suite, and benchmark/documentation
+work in this fork are maintained separately. Released under the [MIT License](LICENSE).

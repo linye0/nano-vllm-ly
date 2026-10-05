@@ -2,9 +2,7 @@ import torch
 from torch import nn
 import triton
 import triton.language as tl
-import os
 
-from nanovllm.config import use_custom_kernel
 
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
@@ -56,12 +54,14 @@ class Attention(nn.Module):
         head_dim,
         scale,
         num_kv_heads,
+        custom_kernel=False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
+        self.custom_kernel = custom_kernel
         self.k_cache = self.v_cache = torch.tensor([])
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
@@ -73,7 +73,7 @@ class Attention(nn.Module):
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
             
-            if use_custom_kernel():
+            if self.custom_kernel:
                 # print("[DEBUG] Routing to CUSTOM Flash Attention Prefill Kernel...")
                 o = custom_flash_attn_varlen_func(
                     q, k, v,
@@ -89,7 +89,7 @@ class Attention(nn.Module):
                     max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                     softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
-            if use_custom_kernel():
+            if self.custom_kernel:
                 # print("[DEBUG] Routing to CUSTOM Flash Attention Decode Kernel...")
                 o = custom_flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
                                             cache_seqlens=context.context_lens, block_table=context.block_tables, 
